@@ -71,22 +71,14 @@ pub struct VirtualTablet {
     /// SYN_REPORT, so a frame has to go out in one call: split, libinput reads each slot's
     /// update as a new frame microseconds later, a huge speed, and drops it as a jump.
     touch_out: Vec<EvdevEvent>,
-    width: u32,
-    height: u32,
 }
 
 impl VirtualTablet {
     /// Create a new virtual tablet system (Pen + Touchpad).
-    ///
-    /// The width and height define the coordinate space for input mapping.
-    pub fn new(
-        width: u32,
-        height: u32,
-        descriptor: &TabletDescriptor,
-    ) -> Result<Self, TabletError> {
+    pub fn new(descriptor: &TabletDescriptor) -> Result<Self, TabletError> {
         info!(
-            "Creating virtual tablet devices ({}x{}) as '{}' (VID: {:04x}, PID: {:04x})",
-            width, height, descriptor.name, descriptor.vid, descriptor.pid
+            "Creating virtual tablet devices as '{}' (VID: {:04x}, PID: {:04x})",
+            descriptor.name, descriptor.vid, descriptor.pid
         );
 
         // --- Device 1: Pen (Stylus) ---
@@ -254,15 +246,9 @@ impl VirtualTablet {
             touch_frame: None,
             touch_edge: false,
             touch_out: Vec::new(),
-            width,
-            height,
         })
     }
 
-    /// Get the coordinate space dimensions.
-    pub fn dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
 
     /// Process an input event sent at `timestamp`. Touch events are gathered into one frame
     /// and reported on `flush()`, which the server calls when its input goes quiet.

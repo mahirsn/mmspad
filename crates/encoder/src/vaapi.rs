@@ -9,6 +9,11 @@ use gstreamer_video as gst_video;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+/// How long `encode` waits for the frame it was given: a VA-API encode of one
+/// 2560x1600 frame takes a few ms, and waiting longer than a frame at 50 fps
+/// would hold up the next one.
+const ENCODE_WAIT_MS: u64 = 20;
+
 /// Errors that can occur during encoding.
 #[derive(Debug, Error)]
 pub enum EncoderError {
@@ -220,10 +225,6 @@ impl VideoEncoder {
         })
     }
 
-    /// Get the encoder configuration.
-    pub fn config(&self) -> &EncoderConfig {
-        &self.config
-    }
 
     /// Request that the next frame be encoded as a keyframe.
     pub fn request_keyframe(&mut self) {
@@ -231,8 +232,14 @@ impl VideoEncoder {
         self.force_keyframe = true;
     }
 
-    /// Encode a captured frame.
-    pub fn encode(&mut self, frame: &Frame) -> Result<Option<EncodedFrame>, EncoderError> {
+    /// Encode one frame and return every frame the encoder has finished, in order.
+    ///
+    /// The encoder works asynchronously: right after the push its output is usually not
+    /// there yet. Taking only what was ready at once, as this did, sent each frame a
+    /// frame or two late (capture to encoded: 59 ms against 35 ms now, measured at
+    /// 60 fps). So wait briefly for this frame, then take all that is ready; every
+    /// frame is needed, the decoder cannot skip P-frames.
+    pub fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>, EncoderError> {
         let mut buffer = match &frame.data {
             FrameData::MemPtr(data) => {
                 let normalized = self.normalize_frame_data(frame, data)?;
@@ -338,8 +345,13 @@ impl VideoEncoder {
 
         self.frame_count += 1;
 
-        // Try to pull encoded frame
-        self.pull_encoded_frame()
+        let mut out = Vec::new();
+        let mut wait = gst::ClockTime::from_mseconds(ENCODE_WAIT_MS);
+        while let Some(encoded) = self.pull_encoded_frame(wait)? {
+            out.push(encoded);
+            wait = gst::ClockTime::ZERO;
+        }
+        Ok(out)
     }
 
     fn normalize_frame_data(&self, frame: &Frame, data: &[u8]) -> Result<Vec<u8>, EncoderError> {
@@ -402,12 +414,9 @@ impl VideoEncoder {
         }
     }
 
-    /// Pull an encoded frame from the pipeline (non-blocking).
-    fn pull_encoded_frame(&mut self) -> Result<Option<EncodedFrame>, EncoderError> {
-        match self
-            .appsink
-            .try_pull_sample(gst::ClockTime::from_mseconds(0))
-        {
+    /// Pull an encoded frame, waiting up to `wait` for one.
+    fn pull_encoded_frame(&mut self, wait: gst::ClockTime) -> Result<Option<EncodedFrame>, EncoderError> {
+        match self.appsink.try_pull_sample(wait) {
             Some(sample) => {
                 let buffer = sample
                     .buffer()
@@ -440,40 +449,6 @@ impl VideoEncoder {
         }
     }
 
-    /// Flush the encoder and get any remaining frames.
-    pub fn flush(&mut self) -> Vec<EncodedFrame> {
-        let mut frames = Vec::new();
-
-        // Send EOS
-        let _ = self.appsrc.end_of_stream();
-
-        // Pull remaining frames
-        while let Some(sample) = self
-            .appsink
-            .try_pull_sample(gst::ClockTime::from_mseconds(100))
-        {
-            if let Some(buffer) = sample.buffer() {
-                if let Ok(map) = buffer.map_readable() {
-                    let pts = buffer.pts().map(|t| t.useconds()).unwrap_or(0);
-                    let is_keyframe = is_h264_keyframe(map.as_slice());
-                    if is_keyframe {
-                        debug!(
-                            "Flush keyframe detected, pts: {}, size: {} bytes",
-                            pts,
-                            map.as_slice().len()
-                        );
-                    }
-                    frames.push(EncodedFrame {
-                        is_keyframe,
-                        pts,
-                        data: map.as_slice().to_vec(),
-                    });
-                }
-            }
-        }
-
-        frames
-    }
 }
 
 impl Drop for VideoEncoder {

@@ -94,14 +94,15 @@ impl VideoPipe {
                     encoder.request_keyframe();
                 }
                 match encoder.encode(&frame) {
-                    Ok(Some(mut encoded)) => {
-                        encoded.pts = pts;
-                        pts += 1_000_000 / fps as u64;
-                        if encoded_tx.send(encoded).is_err() {
-                            break;
+                    Ok(frames) => {
+                        for mut encoded in frames {
+                            encoded.pts = pts;
+                            pts += 1_000_000 / fps as u64;
+                            if encoded_tx.send(encoded).is_err() {
+                                return;
+                            }
                         }
                     }
-                    Ok(None) => {}
                     Err(e) => warn!("Encoding error: {}", e),
                 }
             }
@@ -120,10 +121,10 @@ impl VideoPipe {
 
 async fn run(config: ServerConfig) -> Result<()> {
     info!("{:?}", config);
-    // Until the tablet asks for a picture the size is unknown; input is normalized, so
-    // this only names the pen device's range.
+    // The picture's size, sent to the tablet; unknown until it asks for a picture. Input
+    // is normalized, so it does not depend on this.
     let (mut width, mut height) = (1920, 1080);
-    let mut tablet = VirtualTablet::new(width, height, &TabletDescriptor::default())?;
+    let mut tablet = VirtualTablet::new(&TabletDescriptor::default())?;
 
     let addr: SocketAddr = format!("127.0.0.1:{}", config.port).parse()?;
     info!("Listening on {}", addr);
