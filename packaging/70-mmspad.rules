@@ -1,0 +1,2 @@
+# An Android device with USB debugging on (it has an ADB interface): open the way to the PC's mmspad.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_USB_INTERFACES}=="*:ff4201:*", ATTR{serial}=="?*", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="mmspad-usb@$attr{serial}.service"

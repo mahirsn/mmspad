@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/input",
+    "crates/capture",
+    "crates/encoder",
+    "crates/server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["mahirsn"]
+repository = "https://github.com/mahirsn/mmspad"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+# Input injection
+evdev = "0.12"
+
+# Screen capture
+ashpd = { version = "0.10", default-features = false, features = ["tokio"] }
+pipewire = "0.8"
+libspa = "0.8"
+libspa-sys = "0.8"
+libc = "0.2"
+
+# Video encoding
+gstreamer = "0.23"
+gstreamer-video = "0.23"
+gstreamer-app = "0.23"
+gstreamer-allocators = "0.23"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Internal crates
+mmspad-protocol = { path = "crates/protocol" }
+mmspad-input = { path = "crates/input" }
+mmspad-capture = { path = "crates/capture" }
+mmspad-encoder = { path = "crates/encoder" }

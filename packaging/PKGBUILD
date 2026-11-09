@@ -1,0 +1,33 @@
+# Maintainer: mahirsn
+pkgname=mmspad-git
+pkgver=r1
+pkgrel=1
+pkgdesc="Use an Android tablet over USB as a pen tablet and touchpad (server)"
+arch=('x86_64')
+url="https://github.com/mahirsn/mmspad"
+license=('MIT')
+depends=('android-tools' 'gstreamer' 'gst-plugins-base' 'gst-plugins-bad' 'pipewire' 'xdg-desktop-portal')
+makedepends=('git' 'cargo' 'clang')
+provides=('mmspad')
+conflicts=('mmspad')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$pkgname"
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    cd "$pkgname"
+    cargo build --release --locked
+}
+
+package() {
+    cd "$pkgname"
+    install -Dm755 target/release/mmspad "$pkgdir/usr/bin/mmspad"
+    install -Dm644 packaging/mmspad.service "$pkgdir/usr/lib/systemd/user/mmspad.service"
+    install -Dm644 packaging/mmspad-usb@.service "$pkgdir/usr/lib/systemd/user/mmspad-usb@.service"
+    install -Dm644 packaging/70-mmspad.rules "$pkgdir/usr/lib/udev/rules.d/70-mmspad.rules"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

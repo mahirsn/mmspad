@@ -1,0 +1,11 @@
+[package]
+name = "mmspad-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire protocol between the mmspad server and app"
+
+[dependencies]
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }

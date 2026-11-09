@@ -1,0 +1,8 @@
+[Unit]
+Description=mmspad: let the Android device %i reach the PC over USB
+Wants=mmspad.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/adb -s %i wait-for-device reverse tcp:9999 tcp:9999
+TimeoutStartSec=60

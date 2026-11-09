@@ -1,0 +1,21 @@
+[package]
+name = "mmspad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Use an Android tablet over USB as a pen tablet and touchpad"
+
+[[bin]]
+name = "mmspad"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+mmspad-protocol = { workspace = true }
+mmspad-input = { workspace = true }
+mmspad-capture = { workspace = true }
+mmspad-encoder = { workspace = true }

@@ -1,0 +1,9 @@
+[Unit]
+Description=mmspad: an Android tablet on USB as a pen tablet and touchpad
+
+[Service]
+ExecStart=/usr/bin/mmspad
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
