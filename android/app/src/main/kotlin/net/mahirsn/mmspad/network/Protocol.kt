@@ -59,6 +59,8 @@ sealed class InputEvent {
     ) : InputEvent()
 
     object StylusUp : InputEvent()
+    /** Stylus left hover range. */
+    object StylusLeave : InputEvent()
 
     data class StylusButton(
         val button: Int,
@@ -207,6 +209,9 @@ object ProtocolCodec {
             is InputEvent.TouchUp -> {
                 buffer.putInt(6)
                 buffer.putInt(event.id)
+            }
+            is InputEvent.StylusLeave -> {
+                buffer.putInt(7)
             }
         }
 

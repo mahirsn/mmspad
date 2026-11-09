@@ -110,6 +110,8 @@ pub enum InputEvent {
     TouchMove { id: u32, x: f32, y: f32 },
     /// Touch finger lifted.
     TouchUp { id: u32 },
+    /// Stylus left hover range.
+    StylusLeave,
 }
 
 /// Control packets for connection management.

@@ -292,6 +292,7 @@ impl VirtualTablet {
             InputEvent::StylusMove { .. }
             | InputEvent::StylusDown { .. }
             | InputEvent::StylusUp
+            | InputEvent::StylusLeave
             | InputEvent::StylusButton { .. } => {
                 // If this is the FIRST pen event after a while, we should forcibly release any touches
                 // to prevent "stuck" clicks if the user rests their palm while a finger was still down.
@@ -309,6 +310,7 @@ impl VirtualTablet {
                     InputEvent::StylusMove { .. } => self.stylus_move(event),
                     InputEvent::StylusDown { .. } => self.stylus_down(event),
                     InputEvent::StylusUp => self.stylus_up(),
+                    InputEvent::StylusLeave => self.leave_proximity(),
                     InputEvent::StylusButton { button, pressed } => {
                         self.stylus_button(*button, *pressed)
                     }
@@ -430,53 +432,51 @@ impl VirtualTablet {
         // We stay in_proximity = true because the pen is likely still hovering
     }
 
+    /// The pen left hover range: report it, so the cursor goes back to the pointer.
+    ///
+    /// libinput takes a pen that never reports leaving for one that cannot, and then
+    /// ends its proximity itself after 50 ms without events: a pen held still while
+    /// hovering went out and back in at every small move, and the cursor jumped between
+    /// the pen and the pointer. One real leave turns that off.
+    fn leave_proximity(&mut self) -> Result<(), TabletError> {
+        if !self.in_proximity || self.stylus_state.is_down {
+            return Ok(());
+        }
+        self.emit_pen(&[
+            EvdevEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_DISTANCE.0, 0),
+            EvdevEvent::new(EventType::KEY, Key::BTN_TOOL_PEN.0, 0),
+        ])?;
+        self.in_proximity = false;
+        Ok(())
+    }
+
     fn enter_proximity(&mut self) -> Result<(), TabletError> {
-        debug!(
-            "Stylus entering proximity (tool_announced={})",
-            self.tool_announced
-        );
-
-        // Use a realistic serial number for the pen tool.
-        // Wacom uses unique serials per physical pen - we use a fixed one.
-        // The serial helps apps (like Krita) identify and track individual tools.
-        // IMPORTANT: Only send MSC_SERIAL ONCE per session to avoid creating duplicate
-        // tablet_tool objects in the Wayland compositor (zwp_tablet_v2 protocol).
+        // A fixed serial, sent once: each new serial makes the compositor create another
+        // tablet tool (zwp_tablet_v2), and apps such as Krita track tools by it.
         const PEN_SERIAL: i32 = 0x12345678;
-
-        let mut events = vec![EvdevEvent::new(EventType::KEY, Key::BTN_TOOL_PEN.0, 1)];
-
-        // Only send serial on first proximity to register the tool once
-        if !self.tool_announced {
-            events.push(EvdevEvent::new(
-                EventType::MISC,
-                MiscType::MSC_SERIAL.0,
-                PEN_SERIAL,
-            ));
+        let first = !self.tool_announced;
+        let at = [
+            EvdevEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_X.0, self.stylus_state.x),
+            EvdevEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_Y.0, self.stylus_state.y),
+            EvdevEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_DISTANCE.0, 10), // hovering
+        ];
+        let tool = EvdevEvent::new(EventType::KEY, Key::BTN_TOOL_PEN.0, 1);
+        let mut events = vec![tool];
+        if first {
+            events.push(EvdevEvent::new(EventType::MISC, MiscType::MSC_SERIAL.0, PEN_SERIAL));
             self.tool_announced = true;
             info!("Announcing tablet tool with serial {:08x}", PEN_SERIAL);
         }
-
-        // Include current coordinates so the tool appears at the right spot immediately
-        events.extend([
-            EvdevEvent::new(
-                EventType::ABSOLUTE,
-                AbsoluteAxisType::ABS_X.0,
-                self.stylus_state.x,
-            ),
-            EvdevEvent::new(
-                EventType::ABSOLUTE,
-                AbsoluteAxisType::ABS_Y.0,
-                self.stylus_state.y,
-            ),
-            EvdevEvent::new(
-                EventType::ABSOLUTE,
-                AbsoluteAxisType::ABS_DISTANCE.0,
-                10, // Hovering
-            ),
-        ]);
-
+        events.extend(at);
         self.emit_pen(&events)?;
-        self.sync_pen()?;
+        if first {
+            // One real leave right away, so libinput never ends proximity on its own (see
+            // leave_proximity), not even before the pen first leaves range.
+            self.emit_pen(&[EvdevEvent::new(EventType::KEY, Key::BTN_TOOL_PEN.0, 0)])?;
+            let mut back = vec![tool];
+            back.extend(at);
+            self.emit_pen(&back)?;
+        }
         self.in_proximity = true;
         Ok(())
     }
@@ -570,6 +570,11 @@ impl VirtualTablet {
     }
 
     fn touch_down(&mut self, id: u32, x: f32, y: f32) -> Result<(), TabletError> {
+        // A finger already down under this id never got its up (the tablet lost it):
+        // lift it, or it stays on the touchpad and every gesture counts one finger more.
+        if let Some(stale) = self.find_slot_for_id(id) {
+            self.touch_slots[stale as usize].active = false;
+        }
         let slot_idx = match self.find_free_slot() {
             Some(s) => s,
             None => return Ok(()), // No free slots, ignore

@@ -13,6 +13,12 @@ object InputCapture {
     private var lastButtonState = 0
     var isTouchEnabled: Boolean = false
 
+    /** MotionEvent.TOOL_TYPE_PALM, hidden from the SDK. */
+    private const val TOOL_TYPE_PALM = 5
+
+    /** Finger ids that are down on the PC. */
+    private val fingersDown = mutableSetOf<Int>()
+
     /**
      * Convert a MotionEvent to TimestampedInputEvents.
      * Each event includes its proper timestamp for accurate retiming on the server.
@@ -110,9 +116,12 @@ object InputCapture {
                 }
                 events.add(TimestampedInputEvent(currentTimestamp, InputEvent.StylusMove(x, y, event.pressure, tiltX, tiltY)))
             }
-            MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_EXIT -> {
+            MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_HOVER_ENTER -> {
                 // Hover events - pressure is 0
                 events.add(TimestampedInputEvent(currentTimestamp, InputEvent.StylusMove(x, y, 0f, tiltX, tiltY)))
+            }
+            MotionEvent.ACTION_HOVER_EXIT -> {
+                events.add(TimestampedInputEvent(currentTimestamp, InputEvent.StylusLeave))
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
                 events.add(TimestampedInputEvent(currentTimestamp, InputEvent.StylusUp))
@@ -127,30 +136,33 @@ object InputCapture {
         viewWidth: Int,
         viewHeight: Int
     ): List<TimestampedInputEvent> {
-        // Mode 1: Touch Disabled (Pen Only)
-        // Block all finger input if disabled
-        if (!isTouchEnabled) {
-            return emptyList()
-        }
-
-        // Native Palm Rejection Check
-        // If the OS flags this event as a PALM (constant value 3), ignore it entirely.
-        for (i in 0 until event.pointerCount) {
-             if (event.getToolType(i) == 3) { // 3 = TOOL_TYPE_PALM
-                 return emptyList()
-             }
-        }
-
         val events = mutableListOf<TimestampedInputEvent>()
         val currentTimestamp = event.eventTime * 1000
+        // Lift every finger the PC still has down. A finger whose up is never sent stays
+        // on the PC's touchpad, and every later gesture counts one finger more.
+        fun liftAll() {
+            for (id in fingersDown) events.add(TimestampedInputEvent(currentTimestamp, InputEvent.TouchUp(id)))
+            fingersDown.clear()
+        }
+
+        // Touch off, or Android marks a contact as a palm: no fingers on the PC.
+        if (!isTouchEnabled || (0 until event.pointerCount).any { event.getToolType(it) == TOOL_TYPE_PALM }) {
+            liftAll()
+            return events
+        }
+        // A new gesture: whatever was down before has ended.
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) liftAll()
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val index = event.actionIndex
                 val id = event.getPointerId(index)
+                // Only fingers: a pen in the same gesture is not a touchpad contact.
+                if (event.getToolType(index) != MotionEvent.TOOL_TYPE_FINGER) return events
                 val x = event.getX(index) / viewWidth
                 val y = event.getY(index) / viewHeight
                 events.add(TimestampedInputEvent(currentTimestamp, InputEvent.TouchDown(id, x, y)))
+                fingersDown.add(id)
             }
             MotionEvent.ACTION_MOVE -> {
                 // Process historical events for smoother curves
@@ -158,6 +170,7 @@ object InputCapture {
                     val historicalTimestamp = event.getHistoricalEventTime(h) * 1000
                     for (i in 0 until event.pointerCount) {
                         val id = event.getPointerId(i)
+                        if (id !in fingersDown) continue
                         val x = event.getHistoricalX(i, h) / viewWidth
                         val y = event.getHistoricalY(i, h) / viewHeight
                         events.add(TimestampedInputEvent(historicalTimestamp, InputEvent.TouchMove(id, x, y)))
@@ -167,23 +180,17 @@ object InputCapture {
                 // Current event
                 for (i in 0 until event.pointerCount) {
                     val id = event.getPointerId(i)
+                    if (id !in fingersDown) continue
                     val x = event.getX(i) / viewWidth
                     val y = event.getY(i) / viewHeight
                     events.add(TimestampedInputEvent(currentTimestamp, InputEvent.TouchMove(id, x, y)))
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                val index = event.actionIndex
-                val id = event.getPointerId(index)
-                events.add(TimestampedInputEvent(currentTimestamp, InputEvent.TouchUp(id)))
+                val id = event.getPointerId(event.actionIndex)
+                if (fingersDown.remove(id)) events.add(TimestampedInputEvent(currentTimestamp, InputEvent.TouchUp(id)))
             }
-            MotionEvent.ACTION_CANCEL -> {
-                // A cancelled gesture ends every finger, not just the one at actionIndex;
-                // otherwise the rest stay down on the PC's touchpad.
-                for (i in 0 until event.pointerCount) {
-                    events.add(TimestampedInputEvent(currentTimestamp, InputEvent.TouchUp(event.getPointerId(i))))
-                }
-            }
+            MotionEvent.ACTION_CANCEL -> liftAll()
         }
 
         return events
