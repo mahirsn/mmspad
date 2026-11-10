@@ -3,10 +3,10 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use thiserror::Error;
 use tracing::{info, warn};
 
 /// Network errors.
@@ -147,54 +147,90 @@ async fn handle_tcp_client(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    // Buffer for reading the packet header
-    let mut header_buf = [0u8; 3];
-
-    loop {
-        tokio::select! {
-            // Read incoming packets from client
-            result = reader.read_exact(&mut header_buf) => {
-                match result {
-                    Ok(_) => {
-                        // Parse header: [type: u8][length: u16 LE]
-                        let len = u16::from_le_bytes([header_buf[1], header_buf[2]]) as usize;
-
-                        // Read the payload
-                        let mut payload = vec![0u8; len];
-                        reader.read_exact(&mut payload).await?;
-
-                        // Reconstruct the full packet (header + payload)
-                        let mut full_packet = Vec::with_capacity(3 + len);
-                        full_packet.extend_from_slice(&header_buf);
-                        full_packet.extend_from_slice(&payload);
-
-                        // Send to the message handler
-                        if msg_tx.send(TcpMessage {
-                            data: full_packet,
-                            client_id,
-                        }).await.is_err() {
-                            return Err(NetworkError::ChannelClosed);
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                        return Err(NetworkError::ConnectionClosed);
-                    }
-                    Err(e) => {
-                        return Err(NetworkError::Io(e));
-                    }
+    // Keep reads in their own future: read_exact is not cancellation-safe.
+    // Selecting each header read against outgoing traffic can discard partial
+    // headers and leave the TCP stream permanently out of sync.
+    let receive = async {
+        loop {
+            let mut header = [0u8; 3];
+            match reader.read_exact(&mut header).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Err(NetworkError::ConnectionClosed);
                 }
+                Err(e) => return Err(NetworkError::Io(e)),
             }
 
-            // Send outgoing packets to client
-            Some(data) = outgoing_rx.recv() => {
-                writer.write_all(&data).await?;
-                writer.flush().await?;
-            }
-
-            // Channel closed - client handler is shutting down
-            else => {
-                return Ok(());
-            }
+            let len = u16::from_le_bytes([header[1], header[2]]) as usize;
+            let mut packet = vec![0u8; 3 + len];
+            packet[..3].copy_from_slice(&header);
+            reader.read_exact(&mut packet[3..]).await?;
+            msg_tx
+                .send(TcpMessage {
+                    data: packet,
+                    client_id,
+                })
+                .await
+                .map_err(|_| NetworkError::ChannelClosed)?;
         }
+    };
+
+    let send = async {
+        while let Some(data) = outgoing_rx.recv().await {
+            writer.write_all(&data).await?;
+            writer.flush().await?;
+        }
+        Ok(())
+    };
+
+    tokio::select! {
+        result = receive => result,
+        result = send => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
+
+    #[tokio::test]
+    async fn outgoing_traffic_preserves_partial_incoming_packets() {
+        timeout(Duration::from_secs(3), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut peer = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let (msg_tx, mut msg_rx) = mpsc::channel(4);
+            let (outgoing_tx, outgoing_rx) = mpsc::channel(4);
+            let handler = tokio::spawn(handle_tcp_client(stream, 7, msg_tx, outgoing_rx));
+
+            let packet = [3, 4, 0, 1, 2, 3, 4];
+            // Interleave a server write with both a partial header and payload.
+            peer.write_all(&packet[..1]).await.unwrap();
+            sleep(Duration::from_millis(50)).await;
+            outgoing_tx.send(vec![9]).await.unwrap();
+            assert_eq!(peer.read_u8().await.unwrap(), 9);
+
+            peer.write_all(&packet[1..4]).await.unwrap();
+            sleep(Duration::from_millis(50)).await;
+            outgoing_tx.send(vec![8]).await.unwrap();
+            assert_eq!(peer.read_u8().await.unwrap(), 8);
+            peer.write_all(&packet[4..]).await.unwrap();
+
+            let message = msg_rx.recv().await.unwrap();
+            assert_eq!(message.client_id, 7);
+            assert_eq!(message.data, packet);
+
+            // A subsequent packet must still be aligned.
+            peer.write_all(&packet).await.unwrap();
+            assert_eq!(msg_rx.recv().await.unwrap().data, packet);
+            drop(outgoing_tx);
+            handler.await.unwrap().unwrap();
+        })
+        .await
+        .expect("incoming and outgoing traffic must not block each other");
     }
 }
